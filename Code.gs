@@ -2,7 +2,7 @@ const SHEET_ID = '1Ix1NUutrebej-Wc7ZIobFc6qkhccq6J6TxQYTeX1URY';
 const SHEET_NAME = 'シート1';
 const SAVE_EMOJI = 'pushpin';
 const CARE_SHEET_NAME = '患者ケア記録';
-const CARE_CHANNEL = 'C0981JUPKRT'; // テスト用（本番はC0981JUPKRT）
+const CARE_CHANNEL = 'C0981JUPKRT';
 
 function extractPatientName(text) {
   const match = text.match(/([^\s　、。\n]+(?:様|さま|さん))/);
@@ -17,7 +17,7 @@ function doPost(e) {
   const event = payload.event;
   if (!event) return ContentService.createTextOutput('ok');
 
-  // 患者ケア記録
+  // 患者ケア記録の保存
   if (event.type === 'message' && !event.subtype && !event.bot_id &&
       event.channel === CARE_CHANNEL && event.text) {
     const patientName = extractPatientName(event.text);
@@ -47,9 +47,11 @@ function doPost(e) {
     message = { text: event.text, user: event.user, channel: event.channel, ts: event.ts };
   }
   if (message) saveToSheet(message, trigger);
+
   return ContentService.createTextOutput('ok');
 }
 
+// ─── 患者ケア記録を保存してスレッドに返信 ───────────────────────────
 function saveCareRecord(event, patientName) {
   const ss = SpreadsheetApp.openById(SHEET_ID);
   let sheet = ss.getSheetByName(CARE_SHEET_NAME);
@@ -59,14 +61,20 @@ function saveCareRecord(event, patientName) {
     sheet.setFrozenRows(1);
     sheet.getRange(1, 1, 1, 5).setFontWeight('bold');
   }
+
   const date = new Date(parseFloat(event.ts) * 1000);
   const link = `https://slack.com/archives/${event.channel}/p${event.ts.replace('.', '')}`;
   const userName = getUserName(event.user);
+
   sheet.appendRow([
     Utilities.formatDate(date, 'Asia/Tokyo', 'yyyy/MM/dd HH:mm'),
-    patientName, userName, event.text, link
+    patientName,
+    userName,
+    event.text,
+    link
   ]);
-  // 過去の記録を取得して返信
+
+  // 直近10件を取得してスレッドに返信
   const rows = sheet.getDataRange().getValues();
   const records = rows.slice(1)
     .filter(row => row[1] === patientName)
@@ -80,25 +88,30 @@ function saveCareRecord(event, patientName) {
     const dateStr = isNaN(d) ? row[0] : Utilities.formatDate(d, 'Asia/Tokyo', 'yyyy/MM/dd HH:mm');
     text += `*${dateStr}* ${row[2]}\n${row[3]}\n\n`;
   });
-// 保存完了＋過去の記録をスレッドに返信
+
   const token = PropertiesService.getScriptProperties().getProperty('SLACK_TOKEN');
   UrlFetchApp.fetch('https://slack.com/api/chat.postMessage', {
     method: 'POST',
     headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' },
     payload: JSON.stringify({
-      channel: event.channel, thread_ts: event.ts,
+      channel: event.channel,
+      thread_ts: event.ts,
       text: text
     })
   });
+}  // ← saveCareRecord の閉じ括弧
 
+// ─── @メンションで患者の過去記録を返信 ──────────────────────────────
 function replyPatientHistory(channel, ts, patientName) {
   const ss = SpreadsheetApp.openById(SHEET_ID);
   const sheet = ss.getSheetByName(CARE_SHEET_NAME);
   if (!sheet) return;
+
   const rows = sheet.getDataRange().getValues();
   const records = rows.slice(1)
     .filter(row => row[1] === patientName)
     .sort((a, b) => new Date(a[0]) - new Date(b[0]));
+
   let text;
   if (records.length === 0) {
     text = `📋 *${patientName}* の記録はまだありません。`;
@@ -106,18 +119,21 @@ function replyPatientHistory(channel, ts, patientName) {
     text = `📋 *${patientName}* の記録（${records.length}件）\n`;
     text += '─'.repeat(30) + '\n';
     records.forEach(row => {
-  const d = new Date(row[0]);
-  const dateStr = isNaN(d) ? row[0] : Utilities.formatDate(d, 'Asia/Tokyo', 'yyyy/MM/dd HH:mm');
-  text += `*${dateStr}* ${row[2]}\n${row[3]}\n\n`;
-});
+      const d = new Date(row[0]);
+      const dateStr = isNaN(d) ? row[0] : Utilities.formatDate(d, 'Asia/Tokyo', 'yyyy/MM/dd HH:mm');
+      text += `*${dateStr}* ${row[2]}\n${row[3]}\n\n`;
+    });
+  }  // ← if-else の閉じ括弧
+
   const token = PropertiesService.getScriptProperties().getProperty('SLACK_TOKEN');
   UrlFetchApp.fetch('https://slack.com/api/chat.postMessage', {
     method: 'POST',
     headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' },
     payload: JSON.stringify({ channel: channel, thread_ts: ts, text: text })
   });
-}
+}  // ← replyPatientHistory の閉じ括弧
 
+// ─── Slackメッセージ取得 ─────────────────────────────────────────────
 function fetchSlackMessage(channel, ts) {
   const token = PropertiesService.getScriptProperties().getProperty('SLACK_TOKEN');
   const url = `https://slack.com/api/conversations.history?channel=${channel}&latest=${ts}&limit=1&inclusive=true`;
@@ -129,6 +145,7 @@ function fetchSlackMessage(channel, ts) {
   return null;
 }
 
+// ─── メモ番長保存 ────────────────────────────────────────────────────
 function saveToSheet(msg, trigger) {
   const sheet = SpreadsheetApp.openById(SHEET_ID).getSheetByName(SHEET_NAME);
   const date = new Date(parseFloat(msg.ts) * 1000);
@@ -139,6 +156,7 @@ function saveToSheet(msg, trigger) {
   ]);
 }
 
+// ─── ユーザー名取得 ──────────────────────────────────────────────────
 function getUserName(userId) {
   const token = PropertiesService.getScriptProperties().getProperty('SLACK_TOKEN');
   const url = `https://slack.com/api/users.info?user=${userId}`;
@@ -147,7 +165,7 @@ function getUserName(userId) {
   return data.ok ? (data.user.profile.display_name || data.user.profile.real_name) : userId;
 }
 
-// FAX・求人・NTTはこの下に追加してください
+// ─── FAX受信通知 ─────────────────────────────────────────────────────
 const WEBHOOK_URL = 'https://hooks.slack.com/services/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';
 const GMAIL_ADDRESS = 'houkan.omusubi1@gmail.com';
 const FOLDER_ID = '1yshG201gmsdlKO_6riruv6uYFx0kn-lN';
@@ -199,11 +217,12 @@ function checkFaxEmails() {
   });
 }
 
+// ─── 求人メール通知 ──────────────────────────────────────────────────
 const RECRUIT_WEBHOOK_URL = 'https://hooks.slack.com/services/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';
 const RECRUIT_CHANNEL = 'C09SRSTNGS1';
 
 function checkRecruitEmails() {
-  const threads = GmailApp.search('is:unread  subject:求人フォーム', 0, 10);
+  const threads = GmailApp.search('is:unread subject:求人フォーム', 0, 10);
   threads.forEach(thread => {
     const messages = thread.getMessages();
     messages.forEach(message => {
@@ -215,17 +234,17 @@ function checkRecruitEmails() {
         let slackMessage = `🏥 *求人応募がありました！*\n`;
         slackMessage += `• 受信日時：${Utilities.formatDate(date, 'Asia/Tokyo', 'yyyy/MM/dd HH:mm')}\n`;
         slackMessage += `• 件名：${subject}\n`;
-        slackMessage += `\`\`\`${body.substring(0, 1000)}\`\`\``;  
+        slackMessage += `\`\`\`${body.substring(0, 1000)}\`\`\``;
         UrlFetchApp.fetch(RECRUIT_WEBHOOK_URL, {
           method: 'POST', contentType: 'application/json',
           payload: JSON.stringify({ text: slackMessage, channel: RECRUIT_CHANNEL })
         });
-        message.markRead();
       }
     });
   });
 }
 
+// ─── NTTメール通知 ───────────────────────────────────────────────────
 const NTT_WEBHOOK_URL = 'https://hooks.slack.com/services/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';
 
 function checkNTTEmails() {
@@ -242,10 +261,11 @@ function checkNTTEmails() {
         slackMessage += `• 受信日時：${Utilities.formatDate(date, 'Asia/Tokyo', 'yyyy/MM/dd HH:mm')}\n`;
         slackMessage += `• 件名：${subject}\n`;
         slackMessage += `\`\`\`${body.substring(0, 1000)}\`\`\``;
-        UrlFetchApp.fetch(NTT_WEBHOOK_URL, { method: 'POST', contentType: 'application/json', payload: JSON.stringify({ text: slackMessage }) });
+        UrlFetchApp.fetch(NTT_WEBHOOK_URL, {
+          method: 'POST', contentType: 'application/json',
+          payload: JSON.stringify({ text: slackMessage })
+        });
       }
     });
   });
-  }
- }
 }
